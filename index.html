@@ -1,0 +1,215 @@
+﻿<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Spanish Live Captions</title>
+  <style>
+    :root { color-scheme: dark; font-family: system-ui, sans-serif; }
+    body { margin: 0; background: radial-gradient(circle at top, #1a3152 0, #101827 48%); color: #e8eef7; min-height: 100vh; }
+    main { max-width: 980px; margin: 0 auto; padding: 38px 22px 54px; }
+    h1 { margin: 0 0 7px; letter-spacing: -.03em; }
+    .muted { color: #9eacc1; }
+    .panel { padding: 22px; border: 1px solid #334b6b; border-radius: 16px; background: rgba(23,34,55,.82); box-shadow: 0 18px 50px rgba(0,0,0,.18); }
+    .badge { display: inline-flex; align-items: center; gap: 8px; margin-top: 12px; color: #9edcff; font-size: .85rem; }
+    .badge::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: #47d18c; box-shadow: 0 0 12px #47d18c; }
+    .controls { display: flex; flex-wrap: wrap; gap: 12px; align-items: end; margin: 24px 0 16px; }
+    label { display: grid; gap: 5px; color: #b6c3d6; font-size: .9rem; }
+    select, button { border: 1px solid #41516b; border-radius: 9px; padding: 11px 13px; background: #1c2a40; color: inherit; font: inherit; transition: border-color .2s, transform .2s, background .2s; }
+    select:focus, button:focus-visible { outline: 2px solid #63b4ff; outline-offset: 2px; }
+    button { cursor: pointer; background: #2374d8; border-color: #4b9aff; font-weight: 650; }
+    button:hover:not(:disabled) { background: #3188ee; transform: translateY(-1px); }
+    button:disabled { cursor: not-allowed; opacity: .55; }
+    #status { min-height: 1.4em; color: #8fd1ff; }
+    .caption-box { min-height: 210px; padding: 28px; border: 1px solid #3a4a62; border-radius: 14px; background: #172237; }
+    #interim { color: #9eacc1; font-size: 1.25rem; }
+    #final { font-size: clamp(1.8rem, 4vw, 3rem); line-height: 1.25; }
+    .history { margin-top: 26px; max-height: 260px; overflow: auto; }
+    .history p { margin: 8px 0; padding-bottom: 8px; border-bottom: 1px solid #293950; }
+    .notice { margin-top: 24px; font-size: .9rem; color: #f3c87b; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Spanish Live Captions</h1>
+    <div class="muted">Accurate Spanish captions from shared computer audio</div>
+    <div class="badge">Local Whisper recognition · no microphone required</div>
+
+    <div class="panel">
+    <div class="controls">
+      <label>Input
+        <select id="input">
+          <option value="tab">YouTube/browser tab audio</option>
+          <option value="microphone">Microphone / room audio</option>
+        </select>
+      </label>
+      <label>Font size
+        <select id="font-size">
+          <option value="1.8rem">Large</option>
+          <option value="2.5rem">Extra large</option>
+          <option value="1.35rem">Compact</option>
+        </select>
+      </label>
+      <button id="start">Start captions</button>
+      <button id="stop" disabled>Stop</button>
+    </div>
+
+    </div>
+
+    <div id="status" role="status">Ready. Click Start, then choose your YouTube tab and enable Share audio.</div>
+    <section class="caption-box" aria-live="polite" aria-atomic="false">
+      <div id="final">Las frases reconocidas aparecerÃ¡n aquÃ­.</div>
+      <div id="interim"></div>
+    </section>
+    <section class="history" id="history" aria-label="Caption history"></section>
+</main>
+  <script>
+    const input = document.querySelector("#input");
+    const start = document.querySelector("#start");
+    const stop = document.querySelector("#stop");
+    const status = document.querySelector("#status");
+    const finalText = document.querySelector("#final");
+    const interimText = document.querySelector("#interim");
+    const history = document.querySelector("#history");
+    const fontSize = document.querySelector("#font-size");
+    let captureStream;
+    let audioContext;
+    let processor;
+    let sessionId;
+    let active = false;
+    let pendingAudio = Promise.resolve();
+    let captionWindow;
+
+    function setStatus(message) { status.textContent = message; }
+
+    function openCaptionWindow() {
+      if (captionWindow && !captionWindow.closed) {
+        captionWindow.focus();
+        return;
+      }
+      captionWindow = window.open("", "spanish-live-captions", "width=760,height=440,resizable=yes,scrollbars=yes");
+      if (!captionWindow) {
+        setStatus("The caption window was blocked. Allow pop-ups for this site and click Start again.");
+        return;
+      }
+      captionWindow.document.write(`<!doctype html><html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Spanish Live Captions</title><style>:root{color-scheme:dark}body{margin:0;padding:30px;background:radial-gradient(circle at top,#1a3152,#101827 62%);color:#e8eef7;font:24px system-ui,sans-serif;min-height:calc(100vh - 60px)}h1{font-size:18px;color:#9eacc1;margin:0 0 28px;letter-spacing:.03em;text-transform:uppercase}#caption{font-size:clamp(34px,5vw,64px);font-weight:650;line-height:1.2}#interim{margin-top:22px;color:#9eacc1;font-size:28px;line-height:1.25}</style></head><body><h1>Spanish Live Captions · Local Whisper</h1><div id="caption">Esperando audio...</div><div id="interim"></div></body></html>`);
+      captionWindow.document.close();
+      captionWindow.focus();
+    }
+
+    function updatePopup(id, text) {
+      if (!captionWindow || captionWindow.closed) return;
+      const element = captionWindow.document.getElementById(id);
+      if (element) element.textContent = text;
+    }
+
+    function addFinal(text) {
+      const clean = text.trim();
+      if (!clean) return;
+      finalText.textContent = clean;
+      updatePopup("caption", clean);
+      const item = document.createElement("p");
+      item.textContent = clean;
+      history.prepend(item);
+    }
+
+    function downsample(buffer, inputRate, outputRate) {
+      if (inputRate === outputRate) return buffer;
+      const ratio = inputRate / outputRate;
+      const outputLength = Math.round(buffer.length / ratio);
+      const output = new Float32Array(outputLength);
+      for (let i = 0; i < outputLength; i += 1) {
+        output[i] = buffer[Math.min(Math.floor(i * ratio), buffer.length - 1)];
+      }
+      return output;
+    }
+
+    function toPcm16(buffer) {
+      const pcm = new Int16Array(buffer.length);
+      for (let i = 0; i < buffer.length; i += 1) {
+        const sample = Math.max(-1, Math.min(1, buffer[i]));
+        pcm[i] = sample < 0 ? sample * 32768 : sample * 32767;
+      }
+      return pcm;
+    }
+
+    function sendAudio(pcm) {
+      pendingAudio = pendingAudio.then(async () => {
+        const response = await fetch("/api/transcribe", {
+          method: "POST",
+          headers: { "Content-Type": "application/octet-stream", "X-Session-Id": sessionId || "" },
+          body: pcm
+        });
+        if (!response.ok) throw new Error(await response.text());
+        const result = await response.json();
+        sessionId = result.sessionId;
+        if (result.final) addFinal(result.text);
+        else {
+          interimText.textContent = result.text || "";
+          updatePopup("interim", result.text || "");
+        }
+      }).catch((error) => {
+        if (active) setStatus("Transcription error: " + error.message);
+      });
+    }
+
+    start.addEventListener("click", async () => {
+      openCaptionWindow();
+      if (input.value === "tab") {
+        setStatus("Choose the YouTube tab in the share dialog and check Share audio.");
+      } else {
+        setStatus("Choose a microphone in the share dialog.");
+      }
+      try {
+        captureStream = await navigator.mediaDevices.getDisplayMedia({
+          video: true,
+          audio: true
+        });
+        captureStream.getVideoTracks().forEach((track) => track.stop());
+        const audioTracks = captureStream.getAudioTracks();
+        if (!audioTracks.length) throw new Error("No audio was shared. Check Share audio.");
+        audioContext = new AudioContext({ sampleRate: 16000 });
+        const source = audioContext.createMediaStreamSource(captureStream);
+        processor = audioContext.createScriptProcessor(4096, 1, 1);
+        processor.onaudioprocess = (event) => {
+          if (!active) return;
+          const mono = event.inputBuffer.getChannelData(0);
+          const samples = toPcm16(downsample(mono, audioContext.sampleRate, 16000));
+          sendAudio(samples.buffer);
+        };
+        source.connect(processor);
+        processor.connect(audioContext.destination);
+        active = true;
+        start.disabled = true;
+        stop.disabled = false;
+        setStatus("Listening to shared tab audio locally with Whisper...");
+      } catch (error) {
+        setStatus(error.message || "Audio sharing was cancelled.");
+      }
+    });
+
+    stop.addEventListener("click", () => {
+      active = false;
+      if (processor) processor.disconnect();
+      if (audioContext) audioContext.close();
+      if (captureStream) captureStream.getTracks().forEach((track) => track.stop());
+      interimText.textContent = "";
+      updatePopup("interim", "");
+      start.disabled = false;
+      stop.disabled = true;
+      setStatus("Stopped.");
+    });
+
+    fontSize.addEventListener("change", () => {
+      finalText.style.fontSize = fontSize.value;
+    });
+  </script>
+</body>
+</html>
+
+
+
+
+
+
+
